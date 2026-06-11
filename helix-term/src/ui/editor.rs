@@ -9,7 +9,7 @@ use crate::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, ProgressSpinners,
+        Completion, FileTreePanel, ProgressSpinners,
     },
 };
 
@@ -41,6 +41,7 @@ pub struct EditorView {
     pseudo_pending: Vec<KeyEvent>,
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
+    pub(crate) file_tree: Option<FileTreePanel>,
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
@@ -65,6 +66,7 @@ impl EditorView {
             pseudo_pending: Vec::new(),
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
+            file_tree: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
         }
@@ -72,6 +74,27 @@ impl EditorView {
 
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
         &mut self.spinners
+    }
+
+    pub fn toggle_file_tree(&mut self, editor: &mut Editor) {
+        if self.file_tree.take().is_none() {
+            // The current document is revealed lazily on the next render.
+            self.file_tree = Some(FileTreePanel::new(editor));
+        }
+    }
+
+    pub fn focus_file_tree(&mut self, editor: &mut Editor) {
+        match self.file_tree.as_mut() {
+            Some(file_tree) => {
+                let focused = !file_tree.is_focused();
+                file_tree.set_focus(focused);
+            }
+            None => {
+                let mut file_tree = FileTreePanel::new(editor);
+                file_tree.set_focus(true);
+                self.file_tree = Some(file_tree);
+            }
+        }
     }
 
     pub fn render_view(
@@ -1194,6 +1217,13 @@ impl EditorView {
             self.handle_non_key_input(cxt)
         }
 
+        // events inside the file tree panel never reach the editor views
+        if let Some(file_tree) = self.file_tree.as_mut() {
+            if let Some(result) = file_tree.handle_mouse_event(event, cxt) {
+                return result;
+            }
+        }
+
         let config = cxt.editor.config();
         let MouseEvent {
             kind,
@@ -1479,6 +1509,27 @@ impl Component for EditorView {
                 // clear status
                 cx.editor.status_msg = None;
 
+                // route keys to the file tree panel while it has focus,
+                // bypassing the keymap entirely
+                if let Some(file_tree) = self.file_tree.as_mut() {
+                    if file_tree.is_focused() {
+                        file_tree.handle_key_event(&key, &mut cx);
+                        let callbacks = take(&mut cx.callback);
+                        let callback = if callbacks.is_empty() {
+                            None
+                        } else {
+                            let callback: crate::compositor::Callback =
+                                Box::new(move |compositor, cx| {
+                                    for callback in callbacks {
+                                        callback(compositor, cx)
+                                    }
+                                });
+                            Some(callback)
+                        };
+                        return EventResult::Consumed(callback);
+                    }
+                }
+
                 let mode = cx.editor.mode();
 
                 if !self.on_next_key(OnKeyCallbackKind::PseudoPending, &mut cx, key) {
@@ -1619,6 +1670,30 @@ impl Component for EditorView {
             editor_area = editor_area.clip_top(1);
         }
 
+        if let Some(file_tree) = self.file_tree.as_mut() {
+            // keep a usable minimum width for the editor itself
+            let width = config
+                .file_tree
+                .width
+                .min(editor_area.width.saturating_sub(20));
+            let panel_area = editor_area.with_width(width);
+            editor_area = editor_area.clip_left(width);
+
+            // follow the focused document
+            if let Some(path) = cx
+                .editor
+                .document(view!(cx.editor).doc)
+                .and_then(|doc| doc.path())
+                .map(|path| path.to_path_buf())
+            {
+                if file_tree.last_revealed() != Some(path.as_path()) {
+                    file_tree.reveal_path(cx.editor, &path);
+                }
+            }
+
+            file_tree.render(panel_area, surface, cx.editor);
+        }
+
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
 
@@ -1703,6 +1778,14 @@ impl Component for EditorView {
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        // the file tree panel draws its own selection highlight
+        if self
+            .file_tree
+            .as_ref()
+            .is_some_and(|file_tree| file_tree.is_focused())
+        {
+            return (None, CursorKind::Hidden);
+        }
         match editor.cursor() {
             // all block cursors are drawn manually
             (pos, CursorKind::Block) => {

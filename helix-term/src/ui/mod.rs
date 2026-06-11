@@ -1,6 +1,7 @@
 mod completion;
 mod document;
 pub(crate) mod editor;
+mod file_tree;
 mod info;
 pub mod lsp;
 mod markdown;
@@ -20,6 +21,7 @@ use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use completion::Completion;
 pub use editor::EditorView;
+pub use file_tree::FileTreePanel;
 use helix_stdx::rope;
 use helix_view::theme::Style;
 pub use markdown::Markdown;
@@ -364,6 +366,20 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
 }
 
 fn directory_content(root: &Path, editor: &Editor) -> Result<Vec<(PathBuf, bool)>, std::io::Error> {
+    let mut content = directory_children(root, editor, true)?;
+
+    if root.parent().is_some() {
+        content.insert(0, (root.join(".."), true));
+    }
+
+    Ok(content)
+}
+
+pub(crate) fn directory_children(
+    root: &Path,
+    editor: &Editor,
+    flatten_dirs: bool,
+) -> Result<Vec<(PathBuf, bool)>, std::io::Error> {
     use ignore::WalkBuilder;
 
     let config = editor.config();
@@ -389,7 +405,7 @@ fn directory_content(root: &Path, editor: &Editor) -> Result<Vec<(PathBuf, bool)
                     let path = entry.path();
                     let is_dir = path.is_dir();
                     let mut path = path.to_path_buf();
-                    if is_dir && path != root && config.file_explorer.flatten_dirs {
+                    if is_dir && path != root && flatten_dirs && config.file_explorer.flatten_dirs {
                         while let Some(single_child_directory) = get_child_if_single_dir(&path) {
                             path = single_child_directory;
                         }
@@ -402,10 +418,6 @@ fn directory_content(root: &Path, editor: &Editor) -> Result<Vec<(PathBuf, bool)
         .collect();
 
     content.sort_by(|(path1, is_dir1), (path2, is_dir2)| (!is_dir1, path1).cmp(&(!is_dir2, path2)));
-
-    if root.parent().is_some() {
-        content.insert(0, (root.join(".."), true));
-    }
 
     Ok(content)
 }

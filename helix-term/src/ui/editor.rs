@@ -1672,9 +1672,8 @@ impl Component for EditorView {
 
         if let Some(file_tree) = self.file_tree.as_mut() {
             // keep a usable minimum width for the editor itself
-            let width = config
-                .file_tree
-                .width
+            let width = file_tree
+                .width(config.file_tree.width)
                 .min(editor_area.width.saturating_sub(20));
             let panel_area = editor_area.with_width(width);
             editor_area = editor_area.clip_left(width);

@@ -33,7 +33,13 @@ pub struct FileTreePanel {
     last_revealed: Option<PathBuf>,
     /// Scroll the selection into view on the next render.
     ensure_visible: bool,
+    /// Runtime width override (set by resizing); falls back to the config width.
+    width_override: Option<u16>,
+    /// A mouse drag on the border is resizing the panel.
+    resizing: bool,
 }
+
+const MIN_WIDTH: u16 = 10;
 
 struct TreeRow {
     path: PathBuf,
@@ -55,6 +61,8 @@ impl FileTreePanel {
             area: Rect::default(),
             last_revealed: None,
             ensure_visible: true,
+            width_override: None,
+            resizing: false,
         };
         panel.rebuild_rows(editor);
         panel
@@ -70,6 +78,19 @@ impl FileTreePanel {
 
     pub fn last_revealed(&self) -> Option<&Path> {
         self.last_revealed.as_deref()
+    }
+
+    pub fn width(&self, default: u16) -> u16 {
+        self.width_override.unwrap_or(default).max(MIN_WIDTH)
+    }
+
+    fn adjust_width(&mut self, delta: i16) {
+        self.width_override = Some(
+            self.area
+                .width
+                .saturating_add_signed(delta)
+                .max(MIN_WIDTH),
+        );
     }
 
     fn load_children(&mut self, editor: &Editor, dir: &Path) {
@@ -197,6 +218,8 @@ impl FileTreePanel {
             key!('j') | key!(Down) => self.move_selection(1),
             key!('k') | key!(Up) => self.move_selection(-1),
             key!(Enter) | key!('l') | key!(Right) => self.activate_selection(cx),
+            key!('<') => self.adjust_width(-2),
+            key!('>') => self.adjust_width(2),
             key!('h') | key!(Left) => {
                 let collapsible = self
                     .rows
@@ -223,6 +246,21 @@ impl FileTreePanel {
         cx: &mut commands::Context,
     ) -> Option<EventResult> {
         let area = self.area;
+
+        // While dragging the border, capture all mouse events regardless of
+        // bounds so the drag can move outside the panel.
+        if self.resizing {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let width = (event.column.saturating_sub(area.x) + 1).max(MIN_WIDTH);
+                    self.width_override = Some(width);
+                }
+                MouseEventKind::Up(_) => self.resizing = false,
+                _ => {}
+            }
+            return Some(EventResult::Consumed(None));
+        }
+
         let inside = area.width > 0
             && (area.x..area.x + area.width).contains(&event.column)
             && (area.y..area.y + area.height).contains(&event.row);
@@ -232,6 +270,11 @@ impl FileTreePanel {
 
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // grabbing the border column starts a resize drag
+                if event.column == area.x + area.width - 1 {
+                    self.resizing = true;
+                    return Some(EventResult::Consumed(None));
+                }
                 let idx = (event.row - area.y) as usize + self.scroll;
                 if idx < self.rows.len() {
                     self.selection = idx;

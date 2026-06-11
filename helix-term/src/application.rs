@@ -26,7 +26,7 @@ use crate::{
     handlers,
     job::Jobs,
     keymap::Keymaps,
-    ui::{self, overlay::overlaid},
+    ui,
 };
 
 use log::{debug, error, info, warn};
@@ -135,7 +135,10 @@ impl Application {
 
         let jobs = Jobs::new();
 
+        let mut open_file_tree = config.load().editor.file_tree.open_on_startup;
+
         if args.load_tutor {
+            open_file_tree = false;
             let path = helix_loader::runtime_file(Path::new("tutor"));
             editor.open(&path, Action::VerticalSplit)?;
             // Unset path to prevent accidentally saving to the original tutor file.
@@ -143,10 +146,11 @@ impl Application {
         } else if !args.files.is_empty() {
             let mut files_it = args.files.into_iter().peekable();
 
-            // If the first file is a directory, skip it and open a picker
-            if let Some((first, _)) = files_it.next_if(|(p, _)| p.is_dir()) {
-                let picker = ui::file_picker(&editor, first);
-                compositor.push(Box::new(overlaid(picker)));
+            // If the first file is a directory, skip it and open the file
+            // tree panel instead (the working directory was already set to
+            // it in main). The panel itself is created below.
+            if files_it.next_if(|(p, _)| p.is_dir()).is_some() {
+                open_file_tree = true;
             }
 
             // If there are any more files specified, open them
@@ -224,6 +228,12 @@ impl Application {
             editor
                 .new_file_from_stdin(Action::VerticalSplit)
                 .unwrap_or_else(|_| editor.new_file(Action::VerticalSplit));
+        }
+
+        if open_file_tree {
+            if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+                editor_view.file_tree = Some(ui::FileTreePanel::new(&editor));
+            }
         }
 
         #[cfg(windows)]

@@ -271,11 +271,16 @@ impl Default for FileExplorerConfig {
 pub struct FileTreeConfig {
     /// Width of the file tree panel in columns. Defaults to 30.
     pub width: u16,
+    /// Whether the file tree panel is open when helix starts. Defaults to true.
+    pub open_on_startup: bool,
 }
 
 impl Default for FileTreeConfig {
     fn default() -> Self {
-        Self { width: 30 }
+        Self {
+            width: 30,
+            open_on_startup: true,
+        }
     }
 }
 

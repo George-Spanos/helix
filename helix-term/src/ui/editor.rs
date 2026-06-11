@@ -3,7 +3,7 @@ use crate::{
     compositor::{Component, Context, Event, EventResult},
     events::{OnModeSwitch, PostCommand},
     handlers::completion::CompletionItem,
-    key,
+    ctrl, key,
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
@@ -1510,9 +1510,13 @@ impl Component for EditorView {
                 cx.editor.status_msg = None;
 
                 // route keys to the file tree panel while it has focus,
-                // bypassing the keymap entirely
+                // bypassing the keymap. The C-w prefix (and any pending
+                // multi-key sequence, e.g. the `e` of `C-w e`) still goes
+                // through the keymap so window commands keep working.
+                let in_window_sequence =
+                    key == ctrl!('w') || !self.keymaps.pending().is_empty();
                 if let Some(file_tree) = self.file_tree.as_mut() {
-                    if file_tree.is_focused() {
+                    if file_tree.is_focused() && !in_window_sequence {
                         file_tree.handle_key_event(&key, &mut cx);
                         let callbacks = take(&mut cx.callback);
                         let callback = if callbacks.is_empty() {

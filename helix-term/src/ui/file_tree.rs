@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use helix_view::{
     editor::Action,
-    graphics::Rect,
+    graphics::{Modifier, Rect},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     Editor,
 };
@@ -12,7 +12,7 @@ use tui::buffer::Buffer as Surface;
 
 use crate::commands;
 use crate::compositor::EventResult;
-use crate::key;
+use crate::{ctrl, key};
 
 /// A persistent file tree side panel, owned and driven by `EditorView`.
 ///
@@ -37,14 +37,28 @@ pub struct FileTreePanel {
     width_override: Option<u16>,
     /// A mouse drag on the border is resizing the panel.
     resizing: bool,
+    /// Multi-key input in progress (`g` prefix or jump labels).
+    pending: Option<Pending>,
 }
 
 const MIN_WIDTH: u16 = 10;
+/// The root directory name shown above the tree rows.
+const HEADER_HEIGHT: u16 = 1;
 
 struct TreeRow {
     path: PathBuf,
     is_dir: bool,
     depth: u16,
+}
+
+enum Pending {
+    /// `g` typed, awaiting `w`/`g`/`e`.
+    Goto,
+    /// `gw` jump labels over the visible rows: (row index, label chars).
+    Jump {
+        labels: Vec<(usize, [char; 2])>,
+        first: Option<char>,
+    },
 }
 
 impl FileTreePanel {
@@ -63,6 +77,7 @@ impl FileTreePanel {
             ensure_visible: true,
             width_override: None,
             resizing: false,
+            pending: None,
         };
         panel.rebuild_rows(editor);
         panel
@@ -74,6 +89,9 @@ impl FileTreePanel {
 
     pub fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
+        if !focused {
+            self.pending = None;
+        }
     }
 
     pub fn last_revealed(&self) -> Option<&Path> {
@@ -85,12 +103,7 @@ impl FileTreePanel {
     }
 
     fn adjust_width(&mut self, delta: i16) {
-        self.width_override = Some(
-            self.area
-                .width
-                .saturating_add_signed(delta)
-                .max(MIN_WIDTH),
-        );
+        self.width_override = Some(self.area.width.saturating_add_signed(delta).max(MIN_WIDTH));
     }
 
     fn load_children(&mut self, editor: &Editor, dir: &Path) {
@@ -121,7 +134,11 @@ impl FileTreePanel {
                     }
                 }
             }
-            self.rows.push(TreeRow { path, is_dir, depth });
+            self.rows.push(TreeRow {
+                path,
+                is_dir,
+                depth,
+            });
         }
 
         self.selection = self.selection.min(self.rows.len().saturating_sub(1));
@@ -182,6 +199,27 @@ impl FileTreePanel {
         self.ensure_visible = true;
     }
 
+    /// The number of tree rows that fit in the panel, below the header.
+    fn view_height(&self) -> usize {
+        self.area.height.saturating_sub(HEADER_HEIGHT) as usize
+    }
+
+    /// Move the selection to the parent directory's row and collapse it.
+    fn collapse_parent(&mut self, editor: &Editor) {
+        let on_child = self
+            .rows
+            .get(self.selection)
+            .is_some_and(|row| row.depth > 0);
+        if !on_child {
+            return;
+        }
+        self.select_parent();
+        let path = self.rows[self.selection].path.clone();
+        if self.expanded.contains(&path) {
+            self.toggle_dir(editor, &path);
+        }
+    }
+
     /// Move the selection to the parent directory's row.
     fn select_parent(&mut self) {
         let Some(row) = self.rows.get(self.selection) else {
@@ -212,7 +250,82 @@ impl FileTreePanel {
         }
     }
 
+    /// Label the visible rows with two-char jump labels, like the editor's `gw`.
+    fn start_jump(&mut self, editor: &Editor) {
+        let config = editor.config();
+        let alphabet = &config.jump_label_alphabet;
+        let n = alphabet.len();
+        if n == 0 {
+            return;
+        }
+        let visible = self.scroll..(self.scroll + self.view_height()).min(self.rows.len());
+        let labels: Vec<_> = visible
+            .take(n * n)
+            .enumerate()
+            .map(|(i, row)| (row, [alphabet[i / n], alphabet[i % n]]))
+            .collect();
+        if !labels.is_empty() {
+            self.pending = Some(Pending::Jump {
+                labels,
+                first: None,
+            });
+        }
+    }
+
+    /// Handle the second key of a pending multi-key input. The pending state
+    /// has already been taken, so falling through cancels the sequence.
+    fn handle_pending_key(
+        &mut self,
+        pending: Pending,
+        event: &KeyEvent,
+        cx: &mut commands::Context,
+    ) {
+        match pending {
+            Pending::Goto => match *event {
+                key!('g') => {
+                    self.selection = 0;
+                    self.ensure_visible = true;
+                }
+                key!('e') => {
+                    self.selection = self.rows.len().saturating_sub(1);
+                    self.ensure_visible = true;
+                }
+                key!('w') => self.start_jump(cx.editor),
+                _ => {}
+            },
+            Pending::Jump { labels, first } => {
+                let Some(ch) = event.char().filter(|_| event.modifiers.is_empty()) else {
+                    return;
+                };
+                match first {
+                    None => {
+                        let remaining: Vec<_> = labels
+                            .into_iter()
+                            .filter(|(_, label)| label[0] == ch)
+                            .collect();
+                        if !remaining.is_empty() {
+                            self.pending = Some(Pending::Jump {
+                                labels: remaining,
+                                first: Some(ch),
+                            });
+                        }
+                    }
+                    Some(_) => {
+                        if let Some((row, _)) = labels.iter().find(|(_, label)| label[1] == ch) {
+                            self.selection = *row;
+                            self.ensure_visible = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn handle_key_event(&mut self, event: &KeyEvent, cx: &mut commands::Context) {
+        if let Some(pending) = self.pending.take() {
+            self.handle_pending_key(pending, event, cx);
+            return;
+        }
         match *event {
             key!(Esc) => self.focused = false,
             key!('j') | key!(Down) => self.move_selection(1),
@@ -232,6 +345,12 @@ impl FileTreePanel {
                     self.select_parent();
                 }
             }
+            key!('H') => self.collapse_parent(cx.editor),
+            key!('g') => self.pending = Some(Pending::Goto),
+            ctrl!('d') => self.move_selection((self.view_height() / 2).max(1) as isize),
+            ctrl!('u') => self.move_selection(-((self.view_height() / 2).max(1) as isize)),
+            key!(PageDown) => self.move_selection(self.view_height().max(1) as isize),
+            key!(PageUp) => self.move_selection(-(self.view_height().max(1) as isize)),
             // Swallow everything else so keys never leak into the keymap
             // while the panel has focus.
             _ => {}
@@ -270,15 +389,19 @@ impl FileTreePanel {
 
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.pending = None;
                 // grabbing the border column starts a resize drag
                 if event.column == area.x + area.width - 1 {
                     self.resizing = true;
                     return Some(EventResult::Consumed(None));
                 }
-                let idx = (event.row - area.y) as usize + self.scroll;
-                if idx < self.rows.len() {
-                    self.selection = idx;
-                    self.activate_selection(cx);
+                // clicks on the header row select nothing
+                if event.row >= area.y + HEADER_HEIGHT {
+                    let idx = (event.row - area.y - HEADER_HEIGHT) as usize + self.scroll;
+                    if idx < self.rows.len() {
+                        self.selection = idx;
+                        self.activate_selection(cx);
+                    }
                 }
                 Some(EventResult::Consumed(None))
             }
@@ -317,7 +440,23 @@ impl FileTreePanel {
         }
 
         let inner = area.clip_right(1);
-        let height = inner.height as usize;
+
+        // Header: the name of the directory helix was opened in.
+        let root_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.root.display().to_string());
+        surface.set_stringn(
+            inner.x,
+            inner.y,
+            &format!("{}/", root_name),
+            inner.width as usize,
+            directory_style.add_modifier(Modifier::BOLD),
+        );
+
+        let rows_area = inner.clip_top(HEADER_HEIGHT);
+        let height = rows_area.height as usize;
 
         if self.ensure_visible && height > 0 {
             if self.selection < self.scroll {
@@ -329,8 +468,14 @@ impl FileTreePanel {
         }
         self.scroll = self.scroll.min(self.rows.len().saturating_sub(1));
 
+        let jump_labels = match &self.pending {
+            Some(Pending::Jump { labels, first }) => Some((labels, *first)),
+            _ => None,
+        };
+        let jump_label_style = theme.get("ui.virtual.jump-label");
+
         for (i, row) in self.rows.iter().enumerate().skip(self.scroll).take(height) {
-            let y = inner.y + (i - self.scroll) as u16;
+            let y = rows_area.y + (i - self.scroll) as u16;
             let name = row
                 .path
                 .file_name()
@@ -354,6 +499,18 @@ impl FileTreePanel {
             }
             if i == self.selection {
                 surface.set_style(Rect::new(inner.x, y, inner.width, 1), selected_style);
+            }
+            if let Some((labels, first)) = jump_labels {
+                if let Some((_, label)) = labels.iter().find(|(row_idx, _)| *row_idx == i) {
+                    let label_text: String = match first {
+                        None => label.iter().collect(),
+                        Some(_) => label[1].to_string(),
+                    };
+                    if x < inner.x + inner.width {
+                        let max_width = (inner.x + inner.width - x) as usize;
+                        surface.set_stringn(x, y, &label_text, max_width, jump_label_style);
+                    }
+                }
             }
         }
     }

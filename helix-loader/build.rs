@@ -26,6 +26,8 @@ fn main() {
     } else {
         format!("{MAJOR}.{minor}.{PATCH}")
     };
+    // personal fork marker so builds are distinguishable from official releases
+    let calver = format!("{calver}-fork");
     let version: Cow<_> = match &git_hash {
         Some(git_hash) => format!("{} ({})", calver, &git_hash[..8]).into(),
         None => calver.into(),

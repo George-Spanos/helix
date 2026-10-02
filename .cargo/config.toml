@@ -15,3 +15,12 @@ rustflags = ["--cfg", "tokio_unstable", "-C", "target-feature=-crt-static"]
 xtask = "run --package xtask --"
 integration-test = "test --features integration --profile integration --workspace --test integration"
 
+
+# Personal fork: bake the in-tree runtime directory into the binary at build
+# time. This is the `HELIX_DEFAULT_RUNTIME` fallback helix looks up after the
+# user config dir and `HELIX_RUNTIME`, so a `cargo install`/`cargo build` binary
+# finds themes, queries and grammars without needing a `~/.config/helix/runtime`
+# symlink. `relative = true` resolves to `<workspace>/runtime`.
+[env]
+HELIX_DEFAULT_RUNTIME = { value = "runtime", relative = true }
+
